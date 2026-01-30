@@ -1,101 +1,70 @@
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 import base64
-import tempfile
-import numpy as np
-import librosa
-from pydub import AudioSegment
+import requests
 
 app = FastAPI()
 
-API_KEY = "AI_VOICE_DETECTOR_2026_SECRET"
+# Bolt details
+BOLT_ENDPOINT = "https://slrcnkzdzlvgbzhqdli.supabase.co/functions/v1/voice-detection"
+BOLT_API_KEY = "vd_test_37837267-2d32-4185-a6ea-ccdac85d6881"
 
 
 # ==============================
-# Request Model (matches tester)
+# Hackathon Request Model
 # ==============================
-class AudioRequest(BaseModel):
+class HackathonRequest(BaseModel):
+    language: str
+    audio_format: str = Field(..., alias="audioFormat")
     audio_base64: str = Field(..., alias="audioBase64")
-    language: str | None = None
-    audio_format: str | None = Field(None, alias="audioFormat")
 
     class Config:
         populate_by_name = True
 
 
 # ==============================
-# Detection Endpoint
+# Adapter Endpoint
 # ==============================
 @app.post("/detect")
 async def detect_voice(
-    data: AudioRequest,
+    data: HackathonRequest,
     x_api_key: str = Header(None)
 ):
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    # Optional: simple auth for hackathon
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Missing API key")
 
+    # -------- Base64 validation --------
     try:
-        # Decode base64
-        audio_bytes = base64.b64decode(data.audio_base64)
+        base64.b64decode(data.audio_base64, validate=True)
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid Base64 audio. Please provide real encoded audio."
+        )
 
-        # Save raw audio
-        with tempfile.NamedTemporaryFile(delete=False) as raw:
-            raw.write(audio_bytes)
-            raw_path = raw.name
+    # -------- Forward to Bolt --------
+    bolt_payload = {
+        "audio": data.audio_base64,   # IMPORTANT MAPPING
+        "language": data.language[:2] # en / ta / hi / ml / te
+    }
 
-        # Convert to WAV
-        audio = AudioSegment.from_file(raw_path)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav:
-            audio.export(wav.name, format="wav")
-            wav_path = wav.name
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-Key": BOLT_API_KEY
+    }
 
-        # Load audio
-        y, sr = librosa.load(wav_path, sr=None, mono=True)
+    response = requests.post(
+        BOLT_ENDPOINT,
+        json=bolt_payload,
+        headers=headers,
+        timeout=20
+    )
 
-        # Extract MFCCs
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
-
-        # Variability metric
-        variability = float(np.std(mfccs))
-
-        # Normalize variability to 0–1 range
-        # (empirically chosen safe bounds)
-        min_var, max_var = 10.0, 50.0
-        score = (variability - min_var) / (max_var - min_var)
-        score = float(np.clip(score, 0.0, 1.0))
-
-        # Decision logic
-        if score < 0.4:
-            classification = "AI-generated"
-            confidence = round(1.0 - score, 2)
-            explanation = (
-                "Low spectral variability detected. "
-                "Synthetic speech often exhibits uniform acoustic patterns."
-            )
-
-        elif score > 0.6:
-            classification = "Human-generated"
-            confidence = round(score, 2)
-            explanation = (
-                "High spectral variability detected. "
-                "Natural human speech shows irregular acoustic dynamics."
-            )
-
-        else:
-            classification = "Uncertain"
-            confidence = 0.5
-            explanation = (
-                "Acoustic features fall in an overlapping region "
-                "between human and AI-generated speech."
-            )
-
+    if not response.ok:
         return {
-            "classification": classification,
-            "confidence": confidence,
-            "explanation": explanation
+            "error": "Bolt API error",
+            "details": response.text
         }
 
-    except Exception as e:
-        return {
-            "error": f"Audio processing failed: {str(e)}"
-        }
+    return response.json()
