@@ -1,59 +1,51 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
 import base64
 import tempfile
 import numpy as np
 import librosa
 from pydub import AudioSegment
-import os
 
-app = FastAPI(
-    title="AI Generated Voice Detection API",
-    description="Detects whether a voice sample is AI-generated or human-generated",
-    version="1.0"
-)
+app = FastAPI()
 
-# -------------------------------
-# API KEY
-# -------------------------------
 API_KEY = "AI_VOICE_DETECTOR_2026_SECRET"
 
-# -------------------------------
-# ENDPOINT
-# -------------------------------
+# -----------------------------
+# Request Body Model
+# -----------------------------
+class AudioRequest(BaseModel):
+    audio_base64: str
+    language: str | None = None
+    audio_format: str | None = None
+
+# -----------------------------
+# Endpoint
+# -----------------------------
 @app.post("/detect")
 async def detect_voice(
-    audio_base64: str = Form(...),
-    api_key: str = Form(...)
+    data: AudioRequest,
+    x_api_key: str = Header(None)
 ):
-    # -------- AUTH CHECK --------
-    if api_key != API_KEY:
-        return {
-            "error": "Unauthorized: Invalid API Key"
-        }
+    # -------- AUTH --------
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
     try:
-        # -------- DECODE BASE64 --------
-        audio_bytes = base64.b64decode(audio_base64)
+        audio_bytes = base64.b64decode(data.audio_base64)
 
-        # -------- SAVE TEMP MP3 --------
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as mp3_file:
-            mp3_file.write(audio_bytes)
-            mp3_path = mp3_file.name
+        with tempfile.NamedTemporaryFile(suffix=".audio", delete=False) as f:
+            f.write(audio_bytes)
+            audio_path = f.name
 
-        # -------- MP3 → WAV --------
-        audio = AudioSegment.from_file(mp3_path)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_file:
-            audio.export(wav_file.name, format="wav")
-            wav_path = wav_file.name
+        audio = AudioSegment.from_file(audio_path)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wf:
+            audio.export(wf.name, format="wav")
+            wav_path = wf.name
 
-        # -------- LOAD AUDIO --------
         y, sr = librosa.load(wav_path, sr=None)
-
-        # -------- FEATURE EXTRACTION --------
         mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
         variability = np.std(mfccs)
 
-        # -------- SIMPLE DECISION LOGIC --------
         if variability < 20:
             return {
                 "classification": "AI-generated",
